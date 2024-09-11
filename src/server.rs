@@ -17,6 +17,7 @@ use std::{
     net::SocketAddr,
     time::Duration,
 };
+use std::sync::Arc;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
@@ -90,6 +91,29 @@ impl Server {
     }
 }
 
+/// An incoming stream.
+///
+/// Used with [`serve`] and [`IntoMakeServiceWithConnectInfo`].
+///
+/// [`IntoMakeServiceWithConnectInfo`]: crate::extract::connect_info::IntoMakeServiceWithConnectInfo
+#[derive(Clone, Debug)]
+pub struct IncomingStream {
+    local_addr: Result<SocketAddr, Arc<std::io::Error>>,
+    remote_addr: SocketAddr,
+}
+
+impl IncomingStream {
+    /// Returns the local address that this stream is bound to.
+    pub fn local_addr(&self) -> &Result<SocketAddr, Arc<std::io::Error>> {
+        &self.local_addr
+    }
+
+    /// Returns the remote address that this stream is bound to.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+}
+
 impl<A> Server<A> {
     /// Overwrite acceptor.
     pub fn acceptor<Acceptor>(self, acceptor: Acceptor) -> Server<Acceptor> {
@@ -152,7 +176,7 @@ impl<A> Server<A> {
     /// [`MakeService`]: https://docs.rs/tower/0.4/tower/make/trait.MakeService.html
     pub async fn serve<M>(self, mut make_service: M) -> io::Result<()>
     where
-        M: MakeService<SocketAddr, Request<Incoming>>,
+        M: MakeService<IncomingStream, Request<Incoming>>,
         A: Accept<TcpStream, M::Service> + Clone + Send + Sync + 'static,
         A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
         A::Service: SendService<Request<Incoming>> + Send,
@@ -174,7 +198,7 @@ impl<A> Server<A> {
 
         let accept_loop_future = async {
             loop {
-                let (tcp_stream, socket_addr) = tokio::select! {
+                let (tcp_stream, socket_address) = tokio::select! {
                     biased;
                     result = accept(&mut incoming) => result,
                     _ = handle.wait_graceful_shutdown() => return Ok(()),
@@ -184,7 +208,10 @@ impl<A> Server<A> {
                     .await
                     .map_err(io_other)?;
 
-                let service = match make_service.make_service(socket_addr).await {
+                let service = match make_service.make_service(IncomingStream {
+                    local_addr: tcp_stream.local_addr().map_err(Arc::new),
+                    remote_addr: socket_address,
+                }).await {
                     Ok(service) => service,
                     Err(_) => continue,
                 };
